@@ -3,7 +3,7 @@
  * @Author: juneChen && junechen_0606@163.com
  * @Date: 2022-12-06 16:04:14
  * @LastEditors: juneChen && junechen_0606@163.com
- * @LastEditTime: 2022-12-06 18:26:49
+ * @LastEditTime: 2022-12-12 17:33:14
  * @Description: 备份Mysql数据表到文件
  * 
  * Copyright (c) 2022 by juneChen, All Rights Reserved. 
@@ -47,14 +47,14 @@ class MysqlBackupOrRestore
         // 备份文件是否启用压缩
         "compress" => 1,
         // 备份文件压缩级别
-        "compress" => 9,
+        "level" => 9,
     ];
 
     /**
      * 数据库配置
      * @var mixed
      */
-    private static $database_config = [];
+    private static $database_config = "mysql";
 
     /**
      * 数据库备份构造方法
@@ -73,36 +73,34 @@ class MysqlBackupOrRestore
 
         if (isset($config['database_config'])) {
             self::$database_config = $config['database_config'];
-        } else {
-            self::$database_config = config('database.connections.mysql');
         }
     }
 
     /**
-     * 打开一个卷，用于写入数据
-     * @param integer $size 写入数据的大小
+     * 获取数据库所有表信息列表
+     *
+     * @author juneChen <junechen_0606@163.com>
+     * @return array
      */
-    private function open(int $size = 0)
+    public function getTableList()
     {
-        if ($this->fp) {
-            $this->size += $size;
-            if ($this->size > $this->config['part']) {
-                $this->config['compress'] ? @gzclose($this->fp) : @fclose($this->fp);
-                $this->fp = null;
-                $this->file['part']++;
-                $this->create();
-            }
-        } else {
-            $backup_path = $this->config['path'];
-            $filename    = "{$backup_path}{$this->file['name']}-{$this->file['part']}.sql";
-            if ($this->config['compress']) {
-                $filename = "{$filename}.gz";
-                $this->fp = @gzopen($filename, "a{$this->config['level']}");
-            } else {
-                $this->fp = @fopen($filename, 'a');
-            }
-            $this->size = filesize($filename) + $size;
+        $tableList = Db::connect(self::$database_config)->query("SHOW TABLE STATUS");
+        if (empty($tableList)) {
+            return [];
         }
+
+        $tableList = array_map(function ($val) {
+            $arr = [
+                "tableName" => $val['Name'],
+                "lineNumber" => $val['Rows'],
+                "size" => $this->format_bytes($val['Data_length']),
+                "bredundancy" => $this->format_bytes($val['Data_free']),
+                "comment" => $val['Comment'],
+            ];
+            return $arr;
+        }, $tableList);
+
+        return $tableList;
     }
 
     /**
@@ -111,35 +109,19 @@ class MysqlBackupOrRestore
      */
     public function create()
     {
+        $database_config = Db::connect(self::$database_config)->getConfig();
         $sql  = "-- -----------------------------\n";
         $sql .= "-- MySQL Data Transfer\n";
         $sql .= "--\n";
-        $sql .= "-- Host     : " . self::$database_config['hostname'] . "\n";
-        $sql .= "-- Port     : " . self::$database_config['hostport'] . "\n";
-        $sql .= "-- Database : " . self::$database_config['database'] . "\n";
+        $sql .= "-- Host     : " . $database_config['hostname'] . "\n";
+        $sql .= "-- Port     : " . $database_config['hostport'] . "\n";
+        $sql .= "-- Database : " . $database_config['database'] . "\n";
         $sql .= "--\n";
         $sql .= "-- Part : #{$this->file['part']}\n";
         $sql .= "-- Date : " . date("Y-m-d H:i:s") . "\n";
         $sql .= "-- -----------------------------\n\n";
         $sql .= "SET FOREIGN_KEY_CHECKS = 0;\n\n";
         return $this->write($sql);
-    }
-
-    /**
-     * 写入SQL语句
-     * @param string $sql 要写入的SQL语句
-     * @return int
-     */
-    private function write(string $sql = '')
-    {
-        $size = strlen($sql);
-
-        // 由于压缩原因，无法计算出压缩后的长度，这里假设压缩率为50%，
-        // 一般情况压缩率都会高于50%；
-        $size = $this->config['compress'] ? $size / 2 : $size;
-
-        $this->open($size);
-        return $this->config['compress'] ? @gzwrite($this->fp, $sql) : @fwrite($this->fp, $sql);
     }
 
     /**
@@ -183,7 +165,13 @@ class MysqlBackupOrRestore
             // 备份数据记录
             $result = Db::connect(self::$database_config)->query("SELECT * FROM `{$table}` LIMIT {$start}, 1000");
             foreach ($result as $row) {
-                $row = array_map('addslashes', $row);
+                $row = array_map(function ($val) {
+                    // 解决数据值是 null 时，addslashes报错
+                    if ($val == null) {
+                        $val = '';
+                    }
+                    return addslashes($val);
+                }, $row);
                 $sql = "INSERT INTO `{$table}` VALUES ('" . str_replace(["\r", "\n"], ['\r', '\n'], implode("', '", $row)) . "');\n";
                 if (false === $this->write($sql)) {
                     return false;
@@ -209,6 +197,7 @@ class MysqlBackupOrRestore
      */
     public function restore(int $start = 0)
     {
+
         if ($this->config['compress']) {
             $gz   = gzopen($this->file['name'], 'r');
             $size = 0;
@@ -244,6 +233,68 @@ class MysqlBackupOrRestore
      */
     public function __destruct()
     {
-        $this->config['compress'] ? @gzclose($this->fp) : @fclose($this->fp);
+        if ($this->fp) $this->config['compress'] ? @gzclose($this->fp) : @fclose($this->fp);
+    }
+
+    /**
+     * 打开一个卷，用于写入数据
+     *
+     * @author juneChen <junechen_0606@163.com>
+     * @param integer $size 写入数据的大小
+     * @return void
+     */
+    private function open(float $size = 0)
+    {
+        if ($this->fp) {
+            $this->size += $size;
+            if ($this->size > $this->config['part']) {
+                $this->config['compress'] ? @gzclose($this->fp) : @fclose($this->fp);
+                $this->fp = null;
+                $this->file['part']++;
+                $this->create();
+            }
+        } else {
+            $backup_path = $this->config['path'];
+            $filename    = "{$backup_path}{$this->file['name']}-{$this->file['part']}.sql";
+            if ($this->config['compress']) {
+                $filename = "{$filename}.gz";
+                $this->fp = @gzopen($filename, "a{$this->config['level']}");
+            } else {
+                $this->fp = @fopen($filename, 'a');
+            }
+            $this->size = filesize($filename) + $size;
+        }
+    }
+
+    /**
+     * 写入SQL语句
+     * @param string $sql 要写入的SQL语句
+     * @return int
+     */
+    private function write(string $sql = '')
+    {
+        $size = strlen($sql);
+
+        // 由于压缩原因，无法计算出压缩后的长度，这里假设压缩率为50%，
+        // 一般情况压缩率都会高于50%；
+        $size = $this->config['compress'] ? $size / 2 : $size;
+
+        $this->open($size);
+        return $this->config['compress'] ? @gzwrite($this->fp, $sql) : @fwrite($this->fp, $sql);
+    }
+
+    /**
+     * 格式化字节大小
+     *
+     * @author juneChen <junechen_0606@163.com>
+     * @param  int $size      字节数
+     * @param  string $delimiter 数字和单位分隔符
+     * @return string            格式化后的带单位的大小
+     */
+    private function format_bytes($size, $delimiter = '')
+    {
+        $units = array('B', 'KB', 'MB', 'GB', 'TB', 'PB');
+        for ($i = 0; $size >= 1024 && $i < 5; $i++) $size /= 1024;
+        return round($size, 2) . $delimiter . $units[$i];
     }
 }
