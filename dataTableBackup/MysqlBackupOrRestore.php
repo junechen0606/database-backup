@@ -3,7 +3,7 @@
  * @Author: juneChen && junechen_0606@163.com
  * @Date: 2022-12-06 16:04:14
  * @LastEditors: juneChen && junechen_0606@163.com
- * @LastEditTime: 2022-12-12 17:33:14
+ * @LastEditTime: 2022-12-13 10:54:34
  * @Description: 备份Mysql数据表到文件
  * 
  * Copyright (c) 2022 by juneChen, All Rights Reserved. 
@@ -167,12 +167,16 @@ class MysqlBackupOrRestore
             foreach ($result as $row) {
                 $row = array_map(function ($val) {
                     // 解决数据值是 null 时，addslashes报错
-                    if ($val == null) {
-                        $val = '';
+                    if (is_null($val)) {
+                        $val = 'NULL';
+                    } elseif (is_string($val)) {
+                        $val = "'" . addslashes($val) . "'";
                     }
-                    return addslashes($val);
+                    return $val;
                 }, $row);
-                $sql = "INSERT INTO `{$table}` VALUES ('" . str_replace(["\r", "\n"], ['\r', '\n'], implode("', '", $row)) . "');\n";
+
+                $sql = str_replace('%DATA%', implode(", ", $row), "INSERT INTO `{$table}` VALUES (%DATA%);\n");
+
                 if (false === $this->write($sql)) {
                     return false;
                 }
